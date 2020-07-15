@@ -134,18 +134,19 @@ func (t *GceTemplateBuilder) BuildNodeFromTemplate(mig Mig, template *gce.Instan
 			if item.Value == nil {
 				return nil, fmt.Errorf("no kube-env content in metadata")
 			}
+
 			// Extract labels
 			kubeEnvLabels, err := extractLabelsFromKubeEnv(*item.Value)
 			if err != nil {
 				return nil, err
 			}
 			node.Labels = cloudprovider.JoinStringMaps(node.Labels, kubeEnvLabels)
+
 			// Extract taints
-			kubeEnvTaints, err := extractTaintsFromKubeEnv(*item.Value)
-			if err != nil {
-				return nil, err
+			kubeEnvTaints := extractTaintsFromKubeEnv(*item.Value)
+			if len(kubeEnvTaints) > 0 {
+				node.Spec.Taints = append(node.Spec.Taints, kubeEnvTaints...)
 			}
-			node.Spec.Taints = append(node.Spec.Taints, kubeEnvTaints...)
 
 			if allocatable, err := t.BuildAllocatableFromKubeEnv(node.Status.Capacity, *item.Value); err == nil {
 				nodeAllocatable = allocatable
@@ -224,21 +225,23 @@ func extractLabelsFromKubeEnv(kubeEnv string) (map[string]string, error) {
 	return parseKeyValueListToMap(labels)
 }
 
-func extractTaintsFromKubeEnv(kubeEnv string) ([]apiv1.Taint, error) {
+func extractTaintsFromKubeEnv(kubeEnv string) []apiv1.Taint {
 	// In v1.10+, taints are only exposed for the autoscaler via AUTOSCALER_ENV_VARS
 	// see kubernetes/kubernetes#61119. We try AUTOSCALER_ENV_VARS first, then
 	// fall back to the old way.
 	taints, err := extractAutoscalerVarFromKubeEnv(kubeEnv, "node_taints")
 	if err != nil {
-		klog.Errorf("node_taints not found via AUTOSCALER_ENV_VARS due to error, will try NODE_TAINTS: %v", err)
+		autoScalerVarErr := err
 		taints, err = extractFromKubeEnv(kubeEnv, "NODE_TAINTS")
 		if err != nil {
-			return nil, err
+			klog.Warningf("node_taints not found via AUTOSCALER_ENV_VARS (%v) or NODE_TAINTS (%v)", autoScalerVarErr, err)
+			return nil
 		}
 	}
 	taintMap, err := parseKeyValueListToMap(taints)
 	if err != nil {
-		return nil, err
+		klog.Warningf("unable to parse taints into taint map: %v", err)
+		return nil
 	}
 	return buildTaints(taintMap)
 }
@@ -308,12 +311,12 @@ func parseKeyValueListToMap(kvList string) (map[string]string, error) {
 	return result, nil
 }
 
-func buildTaints(kubeEnvTaints map[string]string) ([]apiv1.Taint, error) {
+func buildTaints(kubeEnvTaints map[string]string) []apiv1.Taint {
 	taints := make([]apiv1.Taint, 0)
 	for key, value := range kubeEnvTaints {
 		values := strings.SplitN(value, ":", 2)
 		if len(values) != 2 {
-			return nil, fmt.Errorf("error while parsing node taint value and effect: %s", value)
+			continue
 		}
 		taints = append(taints, apiv1.Taint{
 			Key:    key,
@@ -321,5 +324,5 @@ func buildTaints(kubeEnvTaints map[string]string) ([]apiv1.Taint, error) {
 			Effect: apiv1.TaintEffect(values[1]),
 		})
 	}
-	return taints, nil
+	return taints
 }
